@@ -65,6 +65,9 @@ type Config struct {
 	// domain.
 	AllowedOrigins []string
 
+	// If set, the server will use this connector to handle password grants
+	PasswordConnectorID string
+
 	// If enabled, the server won't prompt the user to approve authorization requests.
 	// Logging in implies approval.
 	SkipApprovalScreen bool
@@ -135,6 +138,10 @@ type Server struct {
 	// If enabled, don't prompt user for approval after logging in through connector.
 	skipApproval bool
 
+	// Used for password grant
+	passwordConnector   connector.PasswordConnector
+	passwordConnectorID string
+
 	supportedResponseTypes map[string]bool
 
 	now func() time.Time
@@ -202,6 +209,8 @@ func newServer(ctx context.Context, c Config, rotationStrategy rotationStrategy)
 		idTokensValidFor:       value(c.IDTokensValidFor, 24*time.Hour),
 		authRequestsValidFor:   value(c.AuthRequestsValidFor, 24*time.Hour),
 		skipApproval:           c.SkipApprovalScreen,
+		passwordConnector:      nil,
+		passwordConnectorID:    c.PasswordConnectorID,
 		now:                    now,
 		templates:              tmpls,
 		logger:                 c.Logger,
@@ -294,6 +303,20 @@ func newServer(ctx context.Context, c Config, rotationStrategy rotationStrategy)
 
 	s.startKeyRotation(ctx, rotationStrategy, now)
 	s.startGarbageCollection(ctx, value(c.GCFrequency, 5*time.Minute), now)
+
+	if c.PasswordConnectorID != "" {
+		// Which connector
+		conn, err := s.getConnector(c.PasswordConnectorID)
+		if err != nil {
+			return nil, fmt.Errorf("Requested password connector does not exist.")
+		}
+
+		passwordConnector, ok := conn.Connector.(connector.PasswordConnector)
+		if !ok {
+			return nil, fmt.Errorf("Requested password connector does not correct type.")
+		}
+		s.passwordConnector = passwordConnector
+	}
 
 	return s, nil
 }

@@ -690,6 +690,8 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthCode(w, r, client)
 	case grantTypeRefreshToken:
 		s.handleRefreshToken(w, r, client)
+	case grantTypePassword:
+		s.handlePasswordGrant(w, r, client)
 	default:
 		s.tokenErrHelper(w, errInvalidGrant, "", http.StatusBadRequest)
 	}
@@ -730,23 +732,34 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 		return
 	}
 
+	var refreshToken string
+	if conn, err := s.getConnector(authCode.ConnectorID); err != nil {
+		s.logger.Errorf("connector with ID %q not found: %v", authCode.ConnectorID, err)
+		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+	} else {
+		if refreshToken, err = s.generateRefreshTokenIfNeeded(w, conn,
+			authCode.ClientID, authCode.ConnectorID, authCode.Scopes,
+			authCode.Claims, authCode.Nonce, authCode.ConnectorData); err != nil {
+			return
+		}
+	}
+
+	s.writeAccessToken(w, idToken, accessToken, refreshToken, expiry)
+}
+
+func (s *Server) generateRefreshTokenIfNeeded(w http.ResponseWriter, conn connector.Connector,
+	clientID string, connID string, scopes []string, claims storage.Claims, nonce string, connData []byte) (string, error) {
 	reqRefresh := func() bool {
 		// Ensure the connector supports refresh tokens.
 		//
 		// Connectors like `saml` do not implement RefreshConnector.
-		conn, err := s.getConnector(authCode.ConnectorID)
-		if err != nil {
-			s.logger.Errorf("connector with ID %q not found: %v", authCode.ConnectorID, err)
-			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
-			return false
-		}
 
-		_, ok := conn.Connector.(connector.RefreshConnector)
+		_, ok := conn.(connector.RefreshConnector)
 		if !ok {
 			return false
 		}
 
-		for _, scope := range authCode.Scopes {
+		for _, scope := range scopes {
 			if scope == scopeOfflineAccess {
 				return true
 			}
@@ -758,12 +771,12 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 		refresh := storage.RefreshToken{
 			ID:            storage.NewID(),
 			Token:         storage.NewID(),
-			ClientID:      authCode.ClientID,
-			ConnectorID:   authCode.ConnectorID,
-			Scopes:        authCode.Scopes,
-			Claims:        authCode.Claims,
-			Nonce:         authCode.Nonce,
-			ConnectorData: authCode.ConnectorData,
+			ClientID:      clientID,
+			ConnectorID:   connID,
+			Scopes:        scopes,
+			Claims:        claims,
+			Nonce:         nonce,
+			ConnectorData: connData,
 			CreatedAt:     s.now(),
 			LastUsed:      s.now(),
 		}
@@ -771,16 +784,17 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 			RefreshId: refresh.ID,
 			Token:     refresh.Token,
 		}
+		var err error
 		if refreshToken, err = internal.Marshal(token); err != nil {
 			s.logger.Errorf("failed to marshal refresh token: %v", err)
 			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
-			return
+			return "", err
 		}
 
 		if err := s.storage.CreateRefresh(refresh); err != nil {
 			s.logger.Errorf("failed to create refresh token: %v", err)
 			s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
-			return
+			return "", err
 		}
 
 		// deleteToken determines if we need to delete the newly created refresh token
@@ -811,7 +825,7 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 				s.logger.Errorf("failed to get offline session: %v", err)
 				s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
 				deleteToken = true
-				return
+				return "", err
 			}
 			offlineSessions := storage.OfflineSessions{
 				UserID:  refresh.Claims.UserID,
@@ -826,7 +840,7 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 				s.logger.Errorf("failed to create offline session: %v", err)
 				s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
 				deleteToken = true
-				return
+				return "", err
 			}
 		} else {
 			if oldTokenRef, ok := session.Refresh[tokenRef.ClientID]; ok {
@@ -835,7 +849,7 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 					s.logger.Errorf("failed to delete refresh token: %v", err)
 					s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
 					deleteToken = true
-					return
+					return "", err
 				}
 			}
 
@@ -847,12 +861,13 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 				s.logger.Errorf("failed to update offline session: %v", err)
 				s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
 				deleteToken = true
-				return
+				return "", err
 			}
 
 		}
 	}
-	s.writeAccessToken(w, idToken, accessToken, refreshToken, expiry)
+
+	return refreshToken, nil
 }
 
 // handle a refresh token request https://tools.ietf.org/html/rfc6749#section-6
@@ -1072,4 +1087,60 @@ func usernamePrompt(conn connector.PasswordConnector) string {
 		return attr
 	}
 	return "Username"
+}
+
+func (s *Server) handlePasswordGrant(w http.ResponseWriter, r *http.Request, client storage.Client) {
+
+	// Parse the fields
+	if err := r.ParseForm(); err != nil {
+		s.tokenErrHelper(w, errInvalidRequest, "Couldn't parse data", http.StatusBadRequest)
+		return
+	}
+	q := r.Form
+
+	nonce := q.Get("nonce")
+	// Some clients, like the old go-oidc, provide extra whitespace. Tolerate this.
+	scopes := strings.Fields(q.Get("scope"))
+
+	if errType, err := s.checkScopes(scopes, client.ID); err != "" {
+		s.tokenErrHelper(w, errType, err, http.StatusBadRequest)
+		return
+	}
+
+	// Login
+	username := q.Get("username")
+	password := q.Get("password")
+	identity, ok, err := s.passwordConnector.Login(r.Context(), parseScopes(scopes), username, password)
+	if err != nil {
+		s.tokenErrHelper(w, errInvalidRequest, "Could not login user", http.StatusBadRequest)
+		return
+	}
+	if !ok {
+		s.tokenErrHelper(w, errAccessDenied, "Invalid username or password", http.StatusUnauthorized)
+		return
+	}
+
+	// Build the claims to send the id token
+	claims := storage.Claims{
+		UserID:        identity.UserID,
+		Username:      identity.Username,
+		Email:         identity.Email,
+		EmailVerified: identity.EmailVerified,
+		Groups:        identity.Groups,
+	}
+
+	accessToken := storage.NewID()
+	idToken, expiry, err := s.newIDToken(client.ID, claims, scopes, nonce, accessToken, s.passwordConnectorID)
+	if err != nil {
+		s.tokenErrHelper(w, errServerError, fmt.Sprintf("failed to create ID token: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	var refreshToken string
+	if refreshToken, err = s.generateRefreshTokenIfNeeded(w, s.passwordConnector.(connector.Connector),
+		client.ID, s.passwordConnectorID, scopes, claims, nonce, nil); err != nil {
+		return
+	}
+
+	s.writeAccessToken(w, idToken, accessToken, refreshToken, expiry)
 }

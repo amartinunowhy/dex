@@ -1091,6 +1091,11 @@ func usernamePrompt(conn connector.PasswordConnector) string {
 
 func (s *Server) handlePasswordGrant(w http.ResponseWriter, r *http.Request, client storage.Client) {
 
+	if s.passwordConnector == nil {
+		s.tokenErrHelper(w, errInvalidRequest, "No connector for password grant", http.StatusBadRequest)
+		return
+	}
+
 	// Parse the fields
 	if err := r.ParseForm(); err != nil {
 		s.tokenErrHelper(w, errInvalidRequest, "Couldn't parse data", http.StatusBadRequest)

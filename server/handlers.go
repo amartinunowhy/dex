@@ -1143,7 +1143,7 @@ func (s *Server) handlePasswordGrant(w http.ResponseWriter, r *http.Request, cli
 
 	var refreshToken string
 	if refreshToken, err = s.generateRefreshTokenIfNeeded(w, s.passwordConnector.(connector.Connector),
-		client.ID, s.passwordConnectorID, scopes, claims, nonce, nil); err != nil {
+		client.ID, s.passwordConnectorID, scopes, claims, nonce, identity.ConnectorData); err != nil {
 		return
 	}
 

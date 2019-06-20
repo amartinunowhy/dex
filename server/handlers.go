@@ -363,7 +363,7 @@ func (s *Server) handleConnectorLogin(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		redirectURL, err := s.finalizeLogin(identity, authReq, conn.Connector)
+		redirectURL, err := s.finalizeLogin(identity, authReq, conn.Connector, getRequestDeviceId(r))
 		if err != nil {
 			s.logger.Errorf("Failed to finalize login: %v", err)
 			s.renderError(w, http.StatusInternalServerError, "Login error.")
@@ -446,7 +446,7 @@ func (s *Server) handleConnectorCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	redirectURL, err := s.finalizeLogin(identity, authReq, conn.Connector)
+	redirectURL, err := s.finalizeLogin(identity, authReq, conn.Connector, getRequestDeviceId(r))
 	if err != nil {
 		s.logger.Errorf("Failed to finalize login: %v", err)
 		s.renderError(w, http.StatusInternalServerError, "Login error.")
@@ -458,9 +458,9 @@ func (s *Server) handleConnectorCallback(w http.ResponseWriter, r *http.Request)
 
 // finalizeLogin associates the user's identity with the current AuthRequest, then returns
 // the approval page's path.
-func (s *Server) finalizeLogin(identity connector.Identity, authReq storage.AuthRequest, conn connector.Connector) (string, error) {
+func (s *Server) finalizeLogin(identity connector.Identity, authReq storage.AuthRequest, conn connector.Connector, deviceId string) (string, error) {
 	claims := storage.Claims{
-		UserID:        identity.UserID,
+		UserID:        identity.UserID + deviceId,
 		Username:      identity.Username,
 		Email:         identity.Email,
 		EmailVerified: identity.EmailVerified,
@@ -948,8 +948,11 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request, clie
 		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
 		return
 	}
+
+	deviceId := getRequestDeviceId(r)
+
 	ident := connector.Identity{
-		UserID:        refresh.Claims.UserID,
+		UserID:        strings.TrimSuffix(refresh.Claims.UserID, deviceId),
 		Username:      refresh.Claims.Username,
 		Email:         refresh.Claims.Email,
 		EmailVerified: refresh.Claims.EmailVerified,
@@ -973,7 +976,7 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request, clie
 	}
 
 	claims := storage.Claims{
-		UserID:        ident.UserID,
+		UserID:        ident.UserID + deviceId,
 		Username:      ident.Username,
 		Email:         ident.Email,
 		EmailVerified: ident.EmailVerified,
@@ -1089,6 +1092,16 @@ func usernamePrompt(conn connector.PasswordConnector) string {
 	return "Username"
 }
 
+func getRequestDeviceId(r *http.Request) string {
+	const headerName = "X-Unowhy-Device-Id"
+
+	if userIDSuffix := r.Header.Get("X-Unowhy-Device-Id"); userIDSuffix != "" {
+		return ",device=" + userIDSuffix
+	}
+
+	return ""
+}
+
 func (s *Server) handlePasswordGrant(w http.ResponseWriter, r *http.Request, client storage.Client) {
 
 	if s.passwordConnector == nil {
@@ -1127,7 +1140,7 @@ func (s *Server) handlePasswordGrant(w http.ResponseWriter, r *http.Request, cli
 
 	// Build the claims to send the id token
 	claims := storage.Claims{
-		UserID:        identity.UserID,
+		UserID:        identity.UserID + getRequestDeviceId(r),
 		Username:      identity.Username,
 		Email:         identity.Email,
 		EmailVerified: identity.EmailVerified,

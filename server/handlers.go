@@ -978,7 +978,7 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request, clie
 	}
 
 	claims := storage.Claims{
-		UserID:        ident.UserID + deviceId,
+		UserID:        ident.UserID,
 		Username:      ident.Username,
 		Email:         ident.Email,
 		EmailVerified: ident.EmailVerified,

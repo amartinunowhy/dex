@@ -739,7 +739,7 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 	} else {
 		if refreshToken, err = s.generateRefreshTokenIfNeeded(w, conn,
 			authCode.ClientID, authCode.ConnectorID, authCode.Scopes,
-			authCode.Claims, authCode.Nonce, authCode.ConnectorData); err != nil {
+			authCode.Claims, authCode.Nonce, authCode.ConnectorData, getRequestDeviceId(r)); err != nil {
 			return
 		}
 	}
@@ -748,7 +748,7 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 }
 
 func (s *Server) generateRefreshTokenIfNeeded(w http.ResponseWriter, conn connector.Connector,
-	clientID string, connID string, scopes []string, claims storage.Claims, nonce string, connData []byte) (string, error) {
+	clientID string, connID string, scopes []string, claims storage.Claims, nonce string, connData []byte, deviceId string) (string, error) {
 	reqRefresh := func() bool {
 		// Ensure the connector supports refresh tokens.
 		//
@@ -819,8 +819,10 @@ func (s *Server) generateRefreshTokenIfNeeded(w http.ResponseWriter, conn connec
 			LastUsed:  refresh.LastUsed,
 		}
 
+		offlineSessionId := refresh.Claims.UserID + deviceId
+
 		// Try to retrieve an existing OfflineSession object for the corresponding user.
-		if session, err := s.storage.GetOfflineSessions(refresh.Claims.UserID, refresh.ConnectorID); err != nil {
+		if session, err := s.storage.GetOfflineSessions(offlineSessionId, refresh.ConnectorID); err != nil {
 			if err != storage.ErrNotFound {
 				s.logger.Errorf("failed to get offline session: %v", err)
 				s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
@@ -828,7 +830,7 @@ func (s *Server) generateRefreshTokenIfNeeded(w http.ResponseWriter, conn connec
 				return "", err
 			}
 			offlineSessions := storage.OfflineSessions{
-				UserID:  refresh.Claims.UserID,
+				UserID:  offlineSessionId,
 				ConnID:  refresh.ConnectorID,
 				Refresh: make(map[string]*storage.RefreshTokenRef),
 			}
@@ -854,7 +856,7 @@ func (s *Server) generateRefreshTokenIfNeeded(w http.ResponseWriter, conn connec
 			}
 
 			// Update existing OfflineSession obj with new RefreshTokenRef.
-			if err := s.storage.UpdateOfflineSessions(session.UserID, session.ConnID, func(old storage.OfflineSessions) (storage.OfflineSessions, error) {
+			if err := s.storage.UpdateOfflineSessions(offlineSessionId, session.ConnID, func(old storage.OfflineSessions) (storage.OfflineSessions, error) {
 				old.Refresh[tokenRef.ClientID] = &tokenRef
 				return old, nil
 			}); err != nil {
@@ -1022,7 +1024,7 @@ func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request, clie
 
 	// Update LastUsed time stamp in refresh token reference object
 	// in offline session for the user.
-	if err := s.storage.UpdateOfflineSessions(refresh.Claims.UserID, refresh.ConnectorID, func(old storage.OfflineSessions) (storage.OfflineSessions, error) {
+	if err := s.storage.UpdateOfflineSessions(refresh.Claims.UserID+getRequestDeviceId(r), refresh.ConnectorID, func(old storage.OfflineSessions) (storage.OfflineSessions, error) {
 		if old.Refresh[refresh.ClientID].ID != refresh.ID {
 			return old, errors.New("refresh token invalid")
 		}
@@ -1140,7 +1142,7 @@ func (s *Server) handlePasswordGrant(w http.ResponseWriter, r *http.Request, cli
 
 	// Build the claims to send the id token
 	claims := storage.Claims{
-		UserID:        identity.UserID + getRequestDeviceId(r),
+		UserID:        identity.UserID,
 		Username:      identity.Username,
 		Email:         identity.Email,
 		EmailVerified: identity.EmailVerified,
@@ -1156,7 +1158,7 @@ func (s *Server) handlePasswordGrant(w http.ResponseWriter, r *http.Request, cli
 
 	var refreshToken string
 	if refreshToken, err = s.generateRefreshTokenIfNeeded(w, s.passwordConnector.(connector.Connector),
-		client.ID, s.passwordConnectorID, scopes, claims, nonce, identity.ConnectorData); err != nil {
+		client.ID, s.passwordConnectorID, scopes, claims, nonce, identity.ConnectorData, getRequestDeviceId(r)); err != nil {
 		return
 	}
 

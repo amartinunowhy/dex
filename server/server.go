@@ -65,6 +65,9 @@ type Config struct {
 	// domain.
 	AllowedOrigins []string
 
+	// List of allowed header in addition to the standard headers
+	AllowedHeaders []string
+
 	// If set, the server will use this connector to handle password grants
 	PasswordConnectorID string
 
@@ -265,7 +268,8 @@ func newServer(ctx context.Context, c Config, rotationStrategy rotationStrategy)
 		var handler http.Handler = h
 		if len(c.AllowedOrigins) > 0 {
 			corsOption := handlers.AllowedOrigins(c.AllowedOrigins)
-			handler = handlers.CORS(corsOption)(handler)
+			corsHeaderOptions := handlers.AllowedHeaders(c.AllowedHeaders)
+			handler = handlers.CORS(corsOption, corsHeaderOptions)(handler)
 		}
 		r.Handle(path.Join(issuerURL.Path, p), handler)
 	}

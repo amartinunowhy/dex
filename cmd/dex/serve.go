@@ -215,6 +215,10 @@ func serve(cmd *cobra.Command, args []string) error {
 		logger.Infof("config allowed origins: %s", c.Web.AllowedOrigins)
 	}
 
+    if len(c.Web.AllowedHeaders) > 0 {
+		logger.Infof("config allowed headers: %s", c.Web.AllowedHeaders)
+	}
+
 	// explicitly convert to UTC.
 	now := func() time.Time { return time.Now().UTC() }
 
@@ -223,6 +227,7 @@ func serve(cmd *cobra.Command, args []string) error {
 		SkipApprovalScreen:     c.OAuth2.SkipApprovalScreen,
 		PasswordConnectorID:    c.OAuth2.PasswordConnectorID,
 		AllowedOrigins:         c.Web.AllowedOrigins,
+		AllowedHeaders:         c.Web.AllowedHeaders,
 		Issuer:                 c.Issuer,
 		Storage:                s,
 		Web:                    c.Frontend,
